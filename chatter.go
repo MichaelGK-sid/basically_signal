@@ -148,15 +148,12 @@ func (c *Chatter) InitiateHandshake(partnerIdentity *PublicKey) (*PublicKey, err
 	if _, exists := c.Sessions[*partnerIdentity]; exists {
 		return nil, errors.New("Already have session open")
 	}
-
+	var ephemeralKey = GenerateKeyPair()
 	c.Sessions[*partnerIdentity] = &Session{
 		CachedReceiveKeys: make(map[int]*SymmetricKey),
-		// TODO: your code here
-	}
+		MyDHRatchet:       ephemeralKey}
 
-	// TODO: your code here
-
-	return nil, errors.New("Not implemented")
+	return &ephemeralKey.PublicKey, nil
 }
 
 // ReturnHandshake prepares the second message sent in a handshake, containing
@@ -167,15 +164,22 @@ func (c *Chatter) ReturnHandshake(partnerIdentity,
 	if _, exists := c.Sessions[*partnerIdentity]; exists {
 		return nil, nil, errors.New("Already have session open")
 	}
+	var ephemeralKey = GenerateKeyPair()
+	hgAb := DHCombine(partnerIdentity, &ephemeralKey.PrivateKey)
+	hgaB := DHCombine(partnerEphemeral, &c.Identity.PrivateKey)
+	hgab := DHCombine(partnerEphemeral, &ephemeralKey.PrivateKey)
+	var symmetricKey *SymmetricKey = CombineKeys(hgAb, hgaB, hgab)
 
 	c.Sessions[*partnerIdentity] = &Session{
 		CachedReceiveKeys: make(map[int]*SymmetricKey),
 		// TODO: your code here
-	}
+		MyDHRatchet:      ephemeralKey,
+		PartnerDHRatchet: partnerEphemeral,
+		RootChain:        symmetricKey}
 
-	// TODO: your code here
+	checkKey := symmetricKey.DeriveKey(HANDSHAKE_CHECK_LABEL)
+	return &ephemeralKey.PublicKey, checkKey, nil
 
-	return nil, nil, errors.New("Not implemented")
 }
 
 // FinalizeHandshake lets the initiator receive the responder's ephemeral key
@@ -187,9 +191,19 @@ func (c *Chatter) FinalizeHandshake(partnerIdentity,
 		return nil, errors.New("Can't finalize session, not yet open")
 	}
 
-	// TODO: your code here
+	session := c.Sessions[*partnerIdentity]
+	hgAb := DHCombine(partnerEphemeral, &c.Identity.PrivateKey)
+	hgaB := DHCombine(partnerIdentity, &session.MyDHRatchet.PrivateKey)
+	hgab := DHCombine(partnerEphemeral, &session.MyDHRatchet.PrivateKey)
+	// hgAb := DHCombine(partnerIdentity, &session.MyDHRatchet.PrivateKey) // g^(Ab)
+	// hgaB := DHCombine(partnerEphemeral, &c.Identity.PrivateKey)         // g^(aB)
+	// hgab := DHCombine(partnerEphemeral, &session.MyDHRatchet.PrivateKey)
+	var symmetricKey *SymmetricKey = CombineKeys(hgAb, hgaB, hgab)
+	session.RootChain = symmetricKey
+	checkKey := symmetricKey.DeriveKey(HANDSHAKE_CHECK_LABEL)
 
-	return nil, errors.New("Not implemented")
+	return checkKey, nil
+
 }
 
 // SendMessage is used to send the given plaintext string as a message.
@@ -204,7 +218,11 @@ func (c *Chatter) SendMessage(partnerIdentity *PublicKey,
 	message := &Message{
 		Sender:   &c.Identity.PublicKey,
 		Receiver: partnerIdentity,
-		// TODO: your code here
+		NextDHRatchet *PublicKey
+		Counter       int
+		LastUpdate    int
+		Ciphertext    []byte
+		IV            []byte
 	}
 
 	// TODO: your code here
