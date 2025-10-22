@@ -37,6 +37,7 @@ package chatterbox
 
 import (
 	//	"bytes" //un-comment for helpers like bytes.equal
+
 	"encoding/binary"
 	"errors"
 	//	"fmt" //un-comment if you want to do any debug printing.
@@ -178,6 +179,8 @@ func (c *Chatter) ReturnHandshake(partnerIdentity,
 		RootChain:        symmetricKey}
 
 	checkKey := symmetricKey.DeriveKey(HANDSHAKE_CHECK_LABEL)
+	session.SendChain = session.RootChain.DeriveKey(CHAIN_LABEL)
+	session.ReceiveChain = session.RootChain.DeriveKey(CHAIN_LABEL)
 	return &ephemeralKey.PublicKey, checkKey, nil
 
 }
@@ -200,6 +203,8 @@ func (c *Chatter) FinalizeHandshake(partnerIdentity,
 	// hgab := DHCombine(partnerEphemeral, &session.MyDHRatchet.PrivateKey)
 	var symmetricKey *SymmetricKey = CombineKeys(hgAb, hgaB, hgab)
 	session.RootChain = symmetricKey
+	session.SendChain = session.RootChain.DeriveKey(CHAIN_LABEL)
+	session.ReceiveChain = session.RootChain.DeriveKey(CHAIN_LABEL)
 	checkKey := symmetricKey.DeriveKey(HANDSHAKE_CHECK_LABEL)
 
 	return checkKey, nil
@@ -214,20 +219,26 @@ func (c *Chatter) SendMessage(partnerIdentity *PublicKey,
 	if _, exists := c.Sessions[*partnerIdentity]; !exists {
 		return nil, errors.New("Can't send message to partner with no open session")
 	}
+	session := c.Sessions[*partnerIdentity]
+
+	messageKey := session.SendChain.DeriveKey(KEY_LABEL)
+	var iv []byte = NewIV()
+	ciphertext := messageKey.AuthenticatedEncrypt(plaintext, []byte{}, iv)
+
+	session.SendChain = session.SendChain.DeriveKey(CHAIN_LABEL)
 
 	message := &Message{
-		Sender:   &c.Identity.PublicKey,
-		Receiver: partnerIdentity,
-		NextDHRatchet *PublicKey
-		Counter       int
-		LastUpdate    int
-		Ciphertext    []byte
-		IV            []byte
-	}
+		Sender:     &c.Identity.PublicKey,
+		Receiver:   partnerIdentity,
+		Ciphertext: ciphertext,
+		Counter:    session.SendCounter,
+		LastUpdate: session.LastUpdate,
+		IV:         iv}
 
 	// TODO: your code here
+	session.SendCounter += 1
 
-	return message, errors.New("Not implemented")
+	return message, nil
 }
 
 // ReceiveMessage is used to receive the given message and return the correct
