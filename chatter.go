@@ -159,8 +159,6 @@ func (c *Chatter) EndSession(partnerIdentity *PublicKey) error {
 
 	delete(c.Sessions, *partnerIdentity)
 
-	// TODO: your code here to zeroize remaining state
-
 	return nil
 }
 
@@ -187,21 +185,23 @@ func (c *Chatter) ReturnHandshake(partnerIdentity,
 	if _, exists := c.Sessions[*partnerIdentity]; exists {
 		return nil, nil, errors.New("Already have session open")
 	}
+	// Compute shared secret and derive keys
 	var ephemeralKey = GenerateKeyPair()
 	hgAb := DHCombine(partnerIdentity, &ephemeralKey.PrivateKey)
 	hgaB := DHCombine(partnerEphemeral, &c.Identity.PrivateKey)
 	hgab := DHCombine(partnerEphemeral, &ephemeralKey.PrivateKey)
 	var symmetricKey *SymmetricKey = CombineKeys(hgAb, hgaB, hgab)
 
+	// Store session information
 	c.Sessions[*partnerIdentity] = &Session{
 		CachedReceiveKeys: make(map[int]*SymmetricKey),
-		// TODO: your code here
-		MyDHRatchet:      ephemeralKey,
-		PartnerDHRatchet: partnerEphemeral,
-		RootChain:        symmetricKey}
+		MyDHRatchet:       ephemeralKey,
+		PartnerDHRatchet:  partnerEphemeral,
+		RootChain:         symmetricKey}
 
 	checkKey := symmetricKey.DeriveKey(HANDSHAKE_CHECK_LABEL)
 
+	// Initialize chains and counters
 	session := c.Sessions[*partnerIdentity]
 	session.SendChain = symmetricKey.DeriveKey(CHAIN_LABEL)
 	session.ReceiveChain = symmetricKey.DeriveKey(CHAIN_LABEL)
@@ -212,6 +212,7 @@ func (c *Chatter) ReturnHandshake(partnerIdentity,
 	session.IsSender = false
 	session.ReceiveCounter = 1
 
+	// Zeroize temporary keys
 	hgAb.Zeroize()
 	hgaB.Zeroize()
 	hgab.Zeroize()
@@ -228,7 +229,7 @@ func (c *Chatter) FinalizeHandshake(partnerIdentity,
 	if _, exists := c.Sessions[*partnerIdentity]; !exists {
 		return nil, errors.New("Can't finalize session, not yet open")
 	}
-
+	// Compute shared secret and derive keys
 	session := c.Sessions[*partnerIdentity]
 	hgAb := DHCombine(partnerEphemeral, &c.Identity.PrivateKey)
 	hgaB := DHCombine(partnerIdentity, &session.MyDHRatchet.PrivateKey)
@@ -245,6 +246,7 @@ func (c *Chatter) FinalizeHandshake(partnerIdentity,
 	session.SendCounter = 1
 	session.ReceiveCounter = 1
 
+	// Zeroize temporary keys
 	hgAb.Zeroize()
 	hgaB.Zeroize()
 	hgab.Zeroize()
@@ -263,9 +265,8 @@ func (c *Chatter) SendMessage(partnerIdentity *PublicKey,
 
 	session := c.Sessions[*partnerIdentity]
 
-	// Check if we need to generate a new DH ratchet
+	// Perform DH ratchet if needed
 	if !session.IsSender {
-		// Generate new DH ratchet key
 		newEphemeral := GenerateKeyPair()
 		session.MyDHRatchet.Zeroize()
 		session.MyDHRatchet = newEphemeral
@@ -283,11 +284,11 @@ func (c *Chatter) SendMessage(partnerIdentity *PublicKey,
 		newRatchet.Zeroize()
 	}
 
-	// Derive message key from send chain
+	// Derive message key and IV
 	messageKey := session.SendChain.DeriveKey(KEY_LABEL)
 	iv := NewIV()
 
-	// Create message
+	// Prepare message structure
 	message := &Message{
 		Sender:        &c.Identity.PublicKey,
 		Receiver:      partnerIdentity,
@@ -298,12 +299,11 @@ func (c *Chatter) SendMessage(partnerIdentity *PublicKey,
 	}
 
 	// Encrypt
-
 	additionalData := message.EncodeAdditionalData()
 	ciphertext := messageKey.AuthenticatedEncrypt(plaintext, additionalData, iv)
 	message.Ciphertext = ciphertext
 
-	// Ratchet send chain and increment counter
+	// Ratchet send chain, increment counter, and Zeroize keys
 	newSendChain := session.SendChain.DeriveKey(CHAIN_LABEL)
 	session.SendChain.Zeroize()
 	session.SendChain = newSendChain
@@ -337,11 +337,13 @@ func (c *Chatter) ReceiveMessage(message *Message) (string, error) {
 		return "", errors.New("Late message with no cached key or replay attack")
 	}
 
+	// No ratchet (same sender)
 	if message.LastUpdate == session.LR {
 		tempChain := session.ReceiveChain
 		tempCachedKeys := make(map[int]*SymmetricKey)
 		createdChains := []*SymmetricKey{}
 
+		// Cache skipped messages temporarily incase of failure
 		for i := session.ReceiveCounter; i < message.Counter; i++ {
 			messageKey := tempChain.DeriveKey(KEY_LABEL)
 			tempCachedKeys[i] = messageKey
@@ -352,9 +354,12 @@ func (c *Chatter) ReceiveMessage(message *Message) (string, error) {
 			tempChain = nextChain
 		}
 
+		// Derive key for current message and decrypt
 		messageKey := tempChain.DeriveKey(KEY_LABEL)
 		additionalData := message.EncodeAdditionalData()
 		plaintext, err := messageKey.AuthenticatedDecrypt(message.Ciphertext, additionalData, message.IV)
+
+		// Handle decryption failure
 		if err != nil {
 			for _, key := range tempCachedKeys {
 				key.Zeroize()
@@ -368,12 +373,14 @@ func (c *Chatter) ReceiveMessage(message *Message) (string, error) {
 			return "", err
 		}
 
+		// SUCCESS - now commit all state changes
 		for i, key := range tempCachedKeys {
 			session.CachedReceiveKeys[i] = key
 		}
 		session.ReceiveChain = tempChain.DeriveKey(CHAIN_LABEL)
 		session.ReceiveCounter = message.Counter + 1
 
+		// Zeroize temporary keys
 		tempChain.Zeroize()
 		messageKey.Zeroize()
 
@@ -384,20 +391,18 @@ func (c *Chatter) ReceiveMessage(message *Message) (string, error) {
 	if message.LastUpdate > session.LR {
 		tempCachedKeys := make(map[int]*SymmetricKey)
 
-		// Cache remaining messages from old receive chain (temporary)
+		// Cache remaining messages from old receive chain (temporary) in case of failure
 		tempChain := session.ReceiveChain
 		createdChains := []*SymmetricKey{}
 		for i := session.ReceiveCounter; i < message.LastUpdate; i++ {
 			messageKey := tempChain.DeriveKey(KEY_LABEL)
 			tempCachedKeys[i] = messageKey
 			nextChain := tempChain.DeriveKey(CHAIN_LABEL)
-			// record nextChain for cleanup if we fail
 			createdChains = append(createdChains, nextChain)
-			// advance tempChain to the newly-created nextChain
 			tempChain = nextChain
 		}
 
-		// Perform temporary DH ratchet
+		// Perform temporary DH ratchet in case of failure
 		newRatchet := DHCombine(message.NextDHRatchet, &session.MyDHRatchet.PrivateKey)
 		ratchetedRoot := session.RootChain.DeriveKey(ROOT_LABEL)
 		newRootChain := CombineKeys(ratchetedRoot, newRatchet)
@@ -412,10 +417,12 @@ func (c *Chatter) ReceiveMessage(message *Message) (string, error) {
 			newReceiveChain = nextChain
 		}
 
-		// Derive key for current message
+		// Derive key for current message and decrypt
 		messageKey := newReceiveChain.DeriveKey(KEY_LABEL)
 		additionalData := message.EncodeAdditionalData()
 		plaintext, err := messageKey.AuthenticatedDecrypt(message.Ciphertext, additionalData, message.IV)
+
+		// Handle decryption failure
 		if err != nil {
 			for _, key := range tempCachedKeys {
 				key.Zeroize()
@@ -444,6 +451,8 @@ func (c *Chatter) ReceiveMessage(message *Message) (string, error) {
 		session.ReceiveCounter = message.Counter + 1
 		session.PartnerDHRatchet = message.NextDHRatchet
 		session.IsSender = false
+
+		// Zeroize temporary keys
 		tempChain.Zeroize()
 		messageKey.Zeroize()
 		newReceiveChain.Zeroize()
